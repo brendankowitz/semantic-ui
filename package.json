@@ -1,0 +1,17 @@
+{
+  "name": "semantic-ui-desktop",
+  "version": "0.1.0",
+  "description": "SemanticUI - Desktop Application",
+  "type": "module",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "build:backend": "dotnet publish src/SemanticUI.Api/SemanticUI.Api.csproj -c Release -r win-x64 --self-contained -o build-outputs/backend/publish",
+    "build:frontend": "cd src/SemanticUI.Web && npm run build",
+    "build:all": "npm run build:backend && npm run build:frontend && npm run build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^1.5.0"
+  }
+}

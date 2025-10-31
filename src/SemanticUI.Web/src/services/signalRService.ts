@@ -4,16 +4,24 @@ import {
   HubConnectionState
 } from '@microsoft/signalr';
 import { Message, StreamChunk, UIDefinition } from '../types';
+import { SessionUserService } from './apiService';
 
 export class ChatSignalRService {
   private connection: HubConnection | null = null;
   private onMessageCallback?: (message: Message) => void;
+  private onStreamStartCallback?: () => void;
+  private onStreamCompleteCallback?: () => void;
   private onUIComponentCallback?: (ui: UIDefinition) => void;
   private onErrorCallback?: (error: string) => void;
+  private streamStarted = false;
 
   async initialize(hubUrl: string, token?: string): Promise<void> {
+    const userId = SessionUserService.getUserId();
+    // Pass userId as query parameter for session identification
+    const urlWithUserId = `${hubUrl}?userId=${encodeURIComponent(userId)}`;
+
     const builder = new HubConnectionBuilder()
-      .withUrl(hubUrl, {
+      .withUrl(urlWithUserId, {
         accessTokenFactory: () => token || ''
       })
       .withAutomaticReconnect({
@@ -55,7 +63,15 @@ export class ChatSignalRService {
       console.log('SignalR connected');
     } catch (error) {
       console.error('Failed to connect to SignalR:', error);
-      throw error;
+      // Try again after a short delay
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      try {
+        await this.connection.start();
+        console.log('SignalR connected on retry');
+      } catch (retryError) {
+        console.error('Retry failed:', retryError);
+        throw retryError;
+      }
     }
   }
 
@@ -83,19 +99,32 @@ export class ChatSignalRService {
         prompt
       );
 
-      const subscription = stream.subscribe({
+      stream.subscribe({
         next: (chunk: StreamChunk) => {
           if (chunk.type === 1 && chunk.uiDefinition) {
-            // UIComponent
+            // UIComponent - signals end of text stream
+            this.onStreamCompleteCallback?.();
             this.onUIComponentCallback?.(chunk.uiDefinition);
           } else if (chunk.type === 0 && chunk.content) {
-            // Text
+            // Text chunk - accumulate these
+            // Only call onStreamStart once, on the first chunk
+            if (!this.streamStarted) {
+              this.streamStarted = true;
+              this.onStreamStartCallback?.();
+            }
             this.onMessageCallback?.({
-              id: crypto.randomUUID(),
+              id: 'streaming-chunk',
               role: 'assistant',
               content: chunk.content,
               timestamp: new Date()
             });
+          } else if (chunk.type === 2) {
+            // Metadata chunk
+            console.log('Got metadata chunk, content:', chunk.content);
+            if (chunk.content === 'stream_complete') {
+              console.log('Got stream_complete marker, calling onStreamCompleteCallback');
+              this.onStreamCompleteCallback?.();
+            }
           } else if (chunk.type === 3) {
             // Error
             this.onErrorCallback?.(chunk.content || 'Unknown error');
@@ -103,9 +132,12 @@ export class ChatSignalRService {
         },
         complete: () => {
           console.log('Stream complete');
+          this.streamStarted = false;
+          this.onStreamCompleteCallback?.();
         },
         error: (err) => {
           console.error('Stream error:', err);
+          this.streamStarted = false;
           this.onErrorCallback?.(err.message || 'Stream error');
         }
       });
@@ -126,6 +158,14 @@ export class ChatSignalRService {
 
   onMessage(callback: (message: Message) => void): void {
     this.onMessageCallback = callback;
+  }
+
+  onStreamStart(callback: () => void): void {
+    this.onStreamStartCallback = callback;
+  }
+
+  onStreamComplete(callback: () => void): void {
+    this.onStreamCompleteCallback = callback;
   }
 
   onUIComponent(callback: (ui: UIDefinition) => void): void {

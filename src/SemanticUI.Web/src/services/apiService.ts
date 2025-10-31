@@ -1,6 +1,29 @@
 import { Chat } from '../types';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+// Detect if running as Tauri desktop app or web
+const isDesktopApp = typeof window !== 'undefined' && (window as any).__TAURI__ !== undefined;
+const API_URL = isDesktopApp
+  ? 'http://localhost:5050'
+  : (import.meta.env.VITE_API_URL || 'http://localhost:5050');
+
+// Get or generate user ID for session
+function getUserId(): string {
+  const cookieName = 'X-User-Id';
+  const cookies = document.cookie.split(';').map(c => c.trim());
+
+  for (const cookie of cookies) {
+    if (cookie.startsWith(cookieName + '=')) {
+      return cookie.substring(cookieName.length + 1);
+    }
+  }
+
+  // If no cookie, generate a new one - it will be set by the server
+  return crypto.randomUUID();
+}
+
+export const SessionUserService = {
+  getUserId
+};
 
 export class ApiService {
   private static async fetch<T>(
@@ -8,6 +31,7 @@ export class ApiService {
     options?: RequestInit
   ): Promise<T> {
     const response = await fetch(`${API_URL}${endpoint}`, {
+      credentials: 'include', // Include cookies with every request
       ...options,
       headers: {
         'Content-Type': 'application/json',

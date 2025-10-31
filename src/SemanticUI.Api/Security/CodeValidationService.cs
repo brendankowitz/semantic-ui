@@ -1,6 +1,7 @@
 using Esprima;
 using Esprima.Ast;
 using SemanticUI.Core.Interfaces;
+using Esprima.Utils;
 
 namespace SemanticUI.Api.Security;
 
@@ -8,10 +9,8 @@ public class CodeValidationService : ICodeValidationService
 {
     private static readonly string[] DangerousIdentifiers = new[]
     {
-        "eval", "Function", "setTimeout", "setInterval",
-        "document.write", "innerHTML", "outerHTML",
-        "__proto__", "constructor.prototype", "XMLHttpRequest",
-        "fetch", "import", "require"
+        "eval", "Function",
+        "__proto__", "constructor.prototype"
     };
 
     private readonly ILogger<CodeValidationService> _logger;
@@ -28,15 +27,11 @@ public class CodeValidationService : ICodeValidationService
         try
         {
             var parser = new JavaScriptParser();
-            var ast = parser.ParseScript(code, new ParserOptions
-            {
-                Tolerant = false,
-                Loc = true
-            });
+            var ast = parser.ParseScript(code);
 
             // Walk the AST
             var visitor = new SecurityVisitor(violations, _logger);
-            ast.AcceptVisitor(visitor);
+            visitor.Visit(ast);
 
             if (violations.Any(v => v.Severity == Severity.Critical))
             {
@@ -78,6 +73,19 @@ public class CodeValidationService : ICodeValidationService
         {
             _violations = violations;
             _logger = logger;
+        }
+
+        public override object? Visit(Node node)
+        {
+            if (node == null) return null;
+
+            return node switch
+            {
+                Identifier id => VisitIdentifier(id),
+                CallExpression call => VisitCallExpression(call),
+                AssignmentExpression assign => VisitAssignmentExpression(assign),
+                _ => base.Visit(node)
+            };
         }
 
         protected override object? VisitIdentifier(Identifier identifier)

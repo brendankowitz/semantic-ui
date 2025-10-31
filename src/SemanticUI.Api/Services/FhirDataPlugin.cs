@@ -54,8 +54,8 @@ public class FhirDataPlugin
             birthDate = "1980-05-15",
             telecom = new[]
             {
-                new { system = "phone", value = "555-0100", use = "home" },
-                new { system = "email", value = "john.doe@example.com" }
+                new { system = "phone", value = "555-0100", use = (string?)"home" },
+                new { system = "email", value = "john.doe@example.com", use = (string?)null }
             },
             address = new[]
             {
@@ -79,32 +79,34 @@ public class FhirDataPlugin
         [Description("Observation category, e.g., 'vital-signs', 'laboratory'")] string? category = null)
     {
         // Mock implementation
-        var mockObservations = new[]
+        object[] mockObservations = new object[]
         {
             new
             {
                 resourceType = "Observation",
                 id = "obs-123",
                 status = "final",
-                category = new[] { new { coding = new[] { new { system = "http://terminology.hl7.org/CodeSystem/observation-category", code = "vital-signs" } } } },
-                code = new { coding = new[] { new { system = "http://loinc.org", code = "8867-4", display = "Heart rate" } } },
+                category = new object[] { new { coding = new object[] { new { system = "http://terminology.hl7.org/CodeSystem/observation-category", code = "vital-signs" } } } },
+                code = new { coding = new object[] { new { system = "http://loinc.org", code = "8867-4", display = "Heart rate" } } },
                 subject = new { reference = $"Patient/{patientId}" },
                 effectiveDateTime = "2024-01-15T10:30:00Z",
-                valueQuantity = new { value = 72, unit = "beats/minute", system = "http://unitsofmeasure.org", code = "/min" }
+                valueQuantity = new { value = 72, unit = "beats/minute", system = "http://unitsofmeasure.org", code = "/min" },
+                component = (object[])null
             },
             new
             {
                 resourceType = "Observation",
                 id = "obs-124",
                 status = "final",
-                category = new[] { new { coding = new[] { new { system = "http://terminology.hl7.org/CodeSystem/observation-category", code = "vital-signs" } } } },
-                code = new { coding = new[] { new { system = "http://loinc.org", code = "85354-9", display = "Blood pressure" } } },
+                category = new object[] { new { coding = new object[] { new { system = "http://terminology.hl7.org/CodeSystem/observation-category", code = "vital-signs" } } } },
+                code = new { coding = new object[] { new { system = "http://loinc.org", code = "85354-9", display = "Blood pressure" } } },
                 subject = new { reference = $"Patient/{patientId}" },
                 effectiveDateTime = "2024-01-15T10:30:00Z",
-                component = new[]
+                valueQuantity = (object)null,
+                component = new object[]
                 {
-                    new { code = new { coding = new[] { new { system = "http://loinc.org", code = "8480-6", display = "Systolic" } } }, valueQuantity = new { value = 120, unit = "mmHg" } },
-                    new { code = new { coding = new[] { new { system = "http://loinc.org", code = "8462-4", display = "Diastolic" } } }, valueQuantity = new { value = 80, unit = "mmHg" } }
+                    new { code = new { coding = new object[] { new { system = "http://loinc.org", code = "8480-6", display = "Systolic" } } }, valueQuantity = new { value = 120, unit = "mmHg" } },
+                    new { code = new { coding = new object[] { new { system = "http://loinc.org", code = "8462-4", display = "Diastolic" } } }, valueQuantity = new { value = 80, unit = "mmHg" } }
                 }
             }
         };
@@ -118,9 +120,9 @@ public class FhirDataPlugin
         [Description("Optional filters in JSON format")] string? filters = null)
     {
         // Mock implementation
-        var stats = metricType switch
+        object[] stats = metricType switch
         {
-            "age-distribution" => new[]
+            "age-distribution" => new object[]
             {
                 new { ageGroup = "0-18", count = 150 },
                 new { ageGroup = "19-35", count = 280 },
@@ -128,12 +130,12 @@ public class FhirDataPlugin
                 new { ageGroup = "51-65", count = 210 },
                 new { ageGroup = "65+", count = 140 }
             },
-            "gender-distribution" => new[]
+            "gender-distribution" => new object[]
             {
                 new { gender = "male", count = 520 },
                 new { gender = "female", count = 580 }
             },
-            _ => new[]
+            _ => new object[]
             {
                 new { condition = "Diabetes", count = 120 },
                 new { condition = "Hypertension", count = 180 },

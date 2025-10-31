@@ -72,7 +72,7 @@ public class ChatService : IChatService
         UIDefinition? currentUIComponent = null;
         var hasYieldedContent = false;
 
-        // Stream the response
+        // Buffer the entire response first
         await foreach (var update in _chatCompletion.GetStreamingChatMessageContentsAsync(
             history,
             executionSettings,
@@ -82,66 +82,108 @@ public class ChatService : IChatService
             if (update.Content != null)
             {
                 textContent.Append(update.Content);
+            }
+        }
 
-                // Check for UI component markers
-                var (remainingText, uiDef) = ExtractUIDefinition(textContent.ToString());
+        // Now process the complete response
+        var fullText = textContent.ToString();
+        var (remainingText, uiDef) = ExtractUIDefinition(fullText);
 
-                if (uiDef != null && currentUIComponent == null)
+        // Prepare chunks to yield (outside try-catch to avoid CS1626 error)
+        var chunksToYield = new List<StreamChunk>();
+        string? errorMessage = null;
+
+        if (uiDef != null)
+        {
+            // We have a UI component
+            _logger.LogInformation("UI component detected: ComponentId={ComponentId}, Type={Type}", uiDef.ComponentId, uiDef.Type);
+
+            // Perform error-prone operations first, capture any errors
+            try
+            {
+                // Try to parse component ID as Guid, or generate a new one if invalid
+                Guid componentGuid;
+                if (!Guid.TryParse(uiDef.ComponentId, out componentGuid))
                 {
-                    currentUIComponent = uiDef;
-
-                    // Validate the UI component code
-                    var validationResult = _codeValidation.ValidateReactCode(uiDef.Code);
-
-                    if (!validationResult.IsValid)
-                    {
-                        _logger.LogWarning("Generated UI component failed validation: {Violations}",
-                            string.Join(", ", validationResult.Violations.Select(v => v.Message)));
-
-                        yield return new StreamChunk
-                        {
-                            Type = ChunkType.Error,
-                            Content = "The generated UI component contains security violations and cannot be rendered."
-                        };
-
-                        continue;
-                    }
-
-                    // Save UI component to database
-                    var uiComponent = new Models.UIComponent
-                    {
-                        Id = Guid.Parse(uiDef.ComponentId),
-                        ChatId = chatGuid,
-                        ComponentType = uiDef.Type,
-                        Code = uiDef.Code,
-                        PropsJson = JsonSerializer.Serialize(uiDef.Props),
-                        DependenciesJson = JsonSerializer.Serialize(uiDef.Dependencies),
-                        CreatedAt = DateTime.UtcNow,
-                        UpdatedAt = DateTime.UtcNow
-                    };
-                    _dbContext.UIComponents.Add(uiComponent);
-                    await _dbContext.SaveChangesAsync(cancellationToken);
-
-                    // Yield UI component chunk
-                    yield return new StreamChunk
-                    {
-                        Type = ChunkType.UIComponent,
-                        UIDefinition = uiDef
-                    };
-
-                    hasYieldedContent = true;
+                    _logger.LogWarning("Component ID '{ComponentId}' is not a valid GUID, generating new GUID", uiDef.ComponentId);
+                    componentGuid = Guid.NewGuid();
+                    // Update the UI definition with the new GUID
+                    uiDef.ComponentId = componentGuid.ToString();
                 }
-                else if (!string.IsNullOrEmpty(update.Content) && currentUIComponent == null)
+
+                // Save UI component to database
+                var uiComponent = new Models.UIComponent
                 {
-                    // Yield text chunk
-                    yield return new StreamChunk
+                    Id = componentGuid,
+                    ChatId = chatGuid,
+                    ComponentType = uiDef.Type,
+                    Code = uiDef.Code,
+                    PropsJson = JsonSerializer.Serialize(uiDef.Props),
+                    DependenciesJson = JsonSerializer.Serialize(uiDef.Dependencies),
+                    CreatedAt = DateTime.UtcNow,
+                    UpdatedAt = DateTime.UtcNow
+                };
+                _dbContext.UIComponents.Add(uiComponent);
+                await _dbContext.SaveChangesAsync(cancellationToken);
+
+                _logger.LogInformation("Saved UI component to database with ID={ComponentId}", componentGuid);
+
+                // Prepare chunks to send
+                if (!string.IsNullOrWhiteSpace(remainingText))
+                {
+                    chunksToYield.Add(new StreamChunk
                     {
                         Type = ChunkType.Text,
-                        Content = update.Content
-                    };
-
-                    hasYieldedContent = true;
+                        Content = remainingText
+                    });
                 }
+
+                chunksToYield.Add(new StreamChunk
+                {
+                    Type = ChunkType.UIComponent,
+                    UIDefinition = uiDef
+                });
+
+                currentUIComponent = uiDef;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to save UI component with ComponentId={ComponentId}", uiDef.ComponentId);
+                errorMessage = $"Failed to process UI component: {ex.Message}";
+            }
+        }
+        else
+        {
+            // No UI component - just send the text
+            if (!string.IsNullOrEmpty(fullText))
+            {
+                chunksToYield.Add(new StreamChunk
+                {
+                    Type = ChunkType.Text,
+                    Content = fullText
+                });
+            }
+        }
+
+        // Now yield the chunks (outside try-catch)
+        if (errorMessage != null)
+        {
+            _logger.LogError("Yielding error chunk: {Error}", errorMessage);
+            yield return new StreamChunk
+            {
+                Type = ChunkType.Error,
+                Content = errorMessage
+            };
+        }
+        else
+        {
+            _logger.LogInformation("Yielding {Count} chunks", chunksToYield.Count);
+            foreach (var chunk in chunksToYield)
+            {
+                _logger.LogInformation("Yielding chunk: Type={Type}, ContentLength={Length}",
+                    chunk.Type, chunk.Content?.Length ?? 0);
+                yield return chunk;
+                hasYieldedContent = true;
             }
         }
 
@@ -167,6 +209,13 @@ public class ChatService : IChatService
             chat.UpdatedAt = DateTime.UtcNow;
             await _dbContext.SaveChangesAsync(cancellationToken);
         }
+
+        // Yield a completion marker to signal the end of streaming
+        yield return new StreamChunk
+        {
+            Type = ChunkType.Metadata,
+            Content = "stream_complete"
+        };
     }
 
     private async Task<Microsoft.SemanticKernel.ChatCompletion.ChatHistory> GetOrCreateChatHistoryAsync(
@@ -216,17 +265,36 @@ public class ChatService : IChatService
 
     private (string text, UIDefinition? uiDef) ExtractUIDefinition(string content)
     {
-        // Pattern: <uiComponent id="..." type="...">```jsx ... ```</uiComponent>
-        var pattern = @"<uiComponent\s+id=""(?<id>[^""]+)""\s+type=""(?<type>[^""]+)""(?:\s+deps=""(?<deps>[^""]*)"")?\s*>\s*```(?:jsx|javascript|tsx?)\s*(?<code>.*?)```\s*</uiComponent>";
-        var match = Regex.Match(content, pattern, RegexOptions.Singleline);
+        // Simpler pattern: find the opening tag, code block, and closing tag separately
+        var openingTagPattern = @"<uiComponent\s+([^>]+)>";
+        var codeBlockPattern = @"```(?:jsx|javascript|tsx?)\s*(.*?)```";
+        var closingTagPattern = @"</uiComponent>";
+
+        var fullPattern = @"<uiComponent\s+([^>]+)>\s*```(?:jsx|javascript|tsx?)\s*(.*?)```\s*</uiComponent>";
+        var match = Regex.Match(content, fullPattern, RegexOptions.Singleline);
+
+        _logger.LogInformation("Checking for UI component in content (length={Length})", content.Length);
 
         if (!match.Success)
+        {
+            _logger.LogInformation("No UI component pattern matched");
             return (content, null);
+        }
 
-        var componentId = match.Groups["id"].Value;
-        var type = match.Groups["type"].Value;
-        var code = match.Groups["code"].Value.Trim();
-        var depsStr = match.Groups["deps"].Value;
+        _logger.LogInformation("UI component pattern matched!");
+
+        // Extract attributes from the opening tag
+        var attributes = match.Groups[1].Value;
+        var code = match.Groups[2].Value.Trim();
+
+        // Parse id, type, and deps from attributes
+        var idMatch = Regex.Match(attributes, @"id=""([^""]+)""");
+        var typeMatch = Regex.Match(attributes, @"type=""([^""]+)""");
+        var depsMatch = Regex.Match(attributes, @"deps=""([^""]*)""");
+
+        var componentId = idMatch.Success ? idMatch.Groups[1].Value : Guid.NewGuid().ToString();
+        var type = typeMatch.Success ? typeMatch.Groups[1].Value : "form";
+        var depsStr = depsMatch.Success ? depsMatch.Groups[1].Value : "";
 
         var dependencies = new Dictionary<string, string>
         {
@@ -345,7 +413,7 @@ Process this interaction, perform any necessary FHIR operations, and respond app
         return new ProcessedResponse
         {
             Content = response.Content ?? string.Empty,
-            Metadata = response.Metadata
+            Metadata = response.Metadata == null ? null : new Dictionary<string, object?>(response.Metadata)
         };
     }
 

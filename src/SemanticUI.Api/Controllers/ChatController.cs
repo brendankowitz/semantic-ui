@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using SemanticUI.Api.Data;
+using SemanticUI.Api.Security;
 using SemanticUI.Core.DTOs;
 
 namespace SemanticUI.Api.Controllers;
@@ -21,8 +22,7 @@ public class ChatController : ControllerBase
     [HttpGet]
     public async Task<ActionResult<ApiResponse<List<object>>>> GetChats()
     {
-        // In production, get userId from JWT claims
-        var userId = User.FindFirst("sub")?.Value ?? "dev-user-001";
+        var userId = UserContextHelper.GetUserId(User);
 
         var chats = await _dbContext.Chats
             .Where(c => c.UserId == userId && !c.IsArchived)
@@ -47,7 +47,7 @@ public class ChatController : ControllerBase
     [HttpGet("{chatId}")]
     public async Task<ActionResult<ApiResponse<object>>> GetChat(Guid chatId)
     {
-        var userId = User.FindFirst("sub")?.Value ?? "dev-user-001";
+        var userId = UserContextHelper.GetUserId(User);
 
         var chat = await _dbContext.Chats
             .Where(c => c.Id == chatId && c.UserId == userId)
@@ -98,7 +98,8 @@ public class ChatController : ControllerBase
     [HttpPost]
     public async Task<ActionResult<ApiResponse<object>>> CreateChat([FromBody] CreateChatRequest request)
     {
-        var userId = User.FindFirst("sub")?.Value ?? "dev-user-001";
+        var userId = UserContextHelper.GetUserId(User);
+        _logger.LogInformation("CreateChat: userId={UserId}, title={Title}", userId, request.Title);
 
         var chat = new Models.Chat
         {
@@ -111,6 +112,8 @@ public class ChatController : ControllerBase
 
         _dbContext.Chats.Add(chat);
         await _dbContext.SaveChangesAsync();
+
+        _logger.LogInformation("Chat created: chatId={ChatId}, userId={UserId}", chat.Id, userId);
 
         return Ok(new ApiResponse<object>
         {
@@ -127,7 +130,7 @@ public class ChatController : ControllerBase
     [HttpDelete("{chatId}")]
     public async Task<ActionResult<ApiResponse<object>>> DeleteChat(Guid chatId)
     {
-        var userId = User.FindFirst("sub")?.Value ?? "dev-user-001";
+        var userId = UserContextHelper.GetUserId(User);
 
         var chat = await _dbContext.Chats
             .FirstOrDefaultAsync(c => c.Id == chatId && c.UserId == userId);

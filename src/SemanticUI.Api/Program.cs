@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.AspNetCore.SignalR.StackExchangeRedis;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.SemanticKernel;
@@ -7,6 +8,7 @@ using Microsoft.SemanticKernel.ChatCompletion;
 using Microsoft.SemanticKernel.Connectors.OpenAI;
 using SemanticUI.Api.Data;
 using SemanticUI.Api.Hubs;
+using SemanticUI.Api.Middleware;
 using SemanticUI.Api.Security;
 using SemanticUI.Api.Services;
 using SemanticUI.Core.Interfaces;
@@ -16,23 +18,18 @@ using System.Threading.RateLimiting;
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container
-builder.Services.AddControllers();
+builder.Services.AddControllers()
+    .AddJsonOptions(options =>
+    {
+        options.JsonSerializerOptions.PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase;
+        options.JsonSerializerOptions.WriteIndented = true;
+    });
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-// Database
-var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
-if (!string.IsNullOrEmpty(connectionString))
-{
-    builder.Services.AddDbContext<AppDbContext>(options =>
-        options.UseNpgsql(connectionString));
-}
-else
-{
-    // Fallback to in-memory database for development
-    builder.Services.AddDbContext<AppDbContext>(options =>
-        options.UseInMemoryDatabase("SemanticUI"));
-}
+// In-memory database only - no persistence
+builder.Services.AddDbContext<AppDbContext>(options =>
+    options.UseInMemoryDatabase("SemanticUI"));
 
 // Redis for caching and SignalR (optional in development)
 var redisConnection = builder.Configuration.GetConnectionString("Redis");
@@ -123,20 +120,26 @@ builder.Services.AddRateLimiter(options =>
     });
 });
 
-// Semantic Kernel
-var openAiKey = builder.Configuration["OpenAI:ApiKey"];
-var openAiModel = builder.Configuration["OpenAI:Model"] ?? "gpt-4";
+// Semantic Kernel with Azure OpenAI
+var azureOpenAiEndpoint = builder.Configuration["AzureOpenAI:Endpoint"];
+var azureOpenAiKey = builder.Configuration["AzureOpenAI:ApiKey"];
+var azureOpenAiDeployment = builder.Configuration["AzureOpenAI:DeploymentName"];
+var azureOpenAiApiVersion = builder.Configuration["AzureOpenAI:ApiVersion"] ?? "2024-02-15-preview";
 
-if (!string.IsNullOrEmpty(openAiKey) && openAiKey != "your-openai-api-key-here")
+if (!string.IsNullOrEmpty(azureOpenAiEndpoint) &&
+    !string.IsNullOrEmpty(azureOpenAiKey) &&
+    azureOpenAiKey != "your-azure-openai-api-key-here" &&
+    !string.IsNullOrEmpty(azureOpenAiDeployment))
 {
     builder.Services.AddSingleton(sp =>
     {
         var kernelBuilder = Kernel.CreateBuilder();
 
-        // Add OpenAI Chat Completion
-        kernelBuilder.AddOpenAIChatCompletion(
-            modelId: openAiModel,
-            apiKey: openAiKey);
+        // Add Azure OpenAI Chat Completion
+        kernelBuilder.AddAzureOpenAIChatCompletion(
+            deploymentName: azureOpenAiDeployment,
+            endpoint: azureOpenAiEndpoint,
+            apiKey: azureOpenAiKey);
 
         // Add FHIR plugins
         kernelBuilder.Plugins.AddFromType<FhirUIGenerationPlugin>("FhirUI");
@@ -150,7 +153,7 @@ if (!string.IsNullOrEmpty(openAiKey) && openAiKey != "your-openai-api-key-here")
 }
 else
 {
-    // Mock services for development without OpenAI key
+    // Mock services for development without Azure OpenAI configuration
     builder.Services.AddSingleton<Kernel>(sp =>
     {
         var kernelBuilder = Kernel.CreateBuilder();
@@ -162,7 +165,7 @@ else
     builder.Services.AddSingleton<IChatCompletionService>(sp =>
     {
         throw new InvalidOperationException(
-            "OpenAI API key is not configured. Please set OpenAI:ApiKey in appsettings.json");
+            "Azure OpenAI is not configured. Please set AzureOpenAI configuration in appsettings.json with: Endpoint, ApiKey, and DeploymentName");
     });
 }
 
@@ -177,6 +180,18 @@ if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI();
+}
+
+// Session-based user middleware (assigns GUID user ID via cookie)
+app.UseMiddleware<SessionUserMiddleware>();
+
+// CORS must be applied before HTTPS redirection to handle preflight requests
+app.UseCors();
+
+// HTTPS redirection only in production
+if (!app.Environment.IsDevelopment())
+{
+    app.UseHttpsRedirection();
 }
 
 // Security headers
@@ -198,10 +213,6 @@ app.Use(async (context, next) =>
     await next();
 });
 
-app.UseHttpsRedirection();
-
-app.UseCors();
-
 if (!string.IsNullOrEmpty(jwtKey))
 {
     app.UseAuthentication();
@@ -220,6 +231,22 @@ app.MapGet("/health", () => Results.Ok(new
     status = "healthy",
     timestamp = DateTime.UtcNow
 }));
+
+// Debug endpoint to check current user ID
+app.MapGet("/api/debug/user", (HttpContext context) =>
+{
+    var userId = UserContextHelper.GetUserId(context.User);
+    var cookieUserId = "";
+    context.Request.Cookies.TryGetValue("X-User-Id", out var cookie);
+    cookieUserId = cookie ?? "NOT_SET";
+
+    return Results.Ok(new
+    {
+        userId,
+        cookieUserId,
+        userClaims = context.User?.Claims?.Select(c => new { c.Type, c.Value }).ToList()
+    });
+});
 
 // Ensure database is created (for development)
 using (var scope = app.Services.CreateScope())
